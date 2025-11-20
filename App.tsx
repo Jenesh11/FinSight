@@ -29,10 +29,8 @@ import { generateFinancialInsights } from './services/geminiService';
 
 // --- DATA & CONSTANTS ---
 
-const RAZORPAY_KEY_ID = "rzp_test_Rhn9WhwAS4RZoF";
-// REPLACE THIS WITH YOUR ACTUAL GOOGLE CLIENT ID FROM GOOGLE CLOUD CONSOLE
-// Example format: "123456789-abc...apps.googleusercontent.com"
-const GOOGLE_CLIENT_ID = "1020638093138-78d5phdu93v7i5aotqt69u27svumlaj7.apps.googleusercontent.com"; 
+const RAZORPAY_KEY_ID = process.env.VITE_RAZORPAY_KEY_ID || "rzp_test_Rhn9WhwAS4RZoF";
+const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID || "";
 
 const CURRENCIES = [
   { code: 'USD', symbol: '$', name: 'United States Dollar' },
@@ -267,8 +265,8 @@ const AuthScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
 
   // Initialize Google Sign In
   useEffect(() => {
-    // Check if window.google is available
-    if (typeof window.google !== 'undefined' && GOOGLE_CLIENT_ID !== "YOUR_GOOGLE_CLIENT_ID_HERE") {
+    // Check if window.google is available and ID is present
+    if (typeof window.google !== 'undefined' && GOOGLE_CLIENT_ID) {
       try {
         window.google.accounts.id.initialize({
           client_id: GOOGLE_CLIENT_ID,
@@ -352,9 +350,9 @@ const AuthScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
             {/* Official Google Button Container */}
             <div ref={googleButtonRef} className="w-full flex justify-center">
               {/* Fallback if JS hasn't loaded or ID is missing */}
-               {GOOGLE_CLIENT_ID === "YOUR_GOOGLE_CLIENT_ID_HERE" && (
+               {!GOOGLE_CLIENT_ID && (
                  <div className="text-xs text-red-500 text-center border border-red-200 p-2 rounded bg-red-50">
-                   developer: set GOOGLE_CLIENT_ID in App.tsx code to enable Google Sign In
+                   developer: set VITE_GOOGLE_CLIENT_ID in .env file to enable Google Sign In
                  </div>
                )}
             </div>
@@ -547,7 +545,7 @@ const PaymentModal = ({ plan, isOpen, onClose, onSuccess, user, currencyCode, cu
     } catch (error) {
       console.error("Razorpay initialization failed", error);
       setIsProcessing(false);
-      alert("Failed to initialize payment. Check console.");
+      alert("Failed to initialize payment. Check console and RAZORPAY_KEY_ID.");
     }
   };
 
