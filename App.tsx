@@ -703,6 +703,11 @@ const App = () => {
   };
 
   const handleExportCSV = () => {
+    // Double check for Pro plan (although UI handles it)
+    if (user?.plan === 'free') {
+        setView('subscription');
+        return;
+    }
     if (transactions.length === 0) return;
     
     const headers = ['Date', 'Type', 'Category', 'Description', 'Amount', 'Currency'];
@@ -733,6 +738,7 @@ const App = () => {
   };
 
   const generateInsights = async () => {
+    if (user?.plan === 'free') return;
     setIsLoadingInsights(true);
     const insights = await generateFinancialInsights(transactions);
     setAiInsights(insights);
@@ -878,7 +884,7 @@ const App = () => {
              <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-primary-500 to-purple-500 flex items-center justify-center text-white font-bold overflow-hidden">
               {user.picture ? <img src={user.picture} alt={user.name} className="w-full h-full object-cover" /> : user.name[0]}
              </div>
-             <div className="flex-1 min-w-0">
+             <div className="flex-1 min-h-0">
                <p className="text-sm font-medium text-slate-900 dark:text-white truncate">{user.name}</p>
                <p className="text-xs text-slate-500 truncate capitalize">{user.plan} Plan</p>
              </div>
@@ -1000,7 +1006,20 @@ const App = () => {
                 </div>
                 
                 <div className="space-y-4 relative z-10 min-h-[180px]">
-                  {isLoadingInsights ? (
+                  {user?.plan === 'free' ? (
+                    <div className="flex flex-col items-center justify-center h-full text-center pt-4">
+                      <div className="bg-slate-700/50 w-12 h-12 rounded-full flex items-center justify-center mb-3">
+                        <Lock className="text-slate-400" size={24} />
+                      </div>
+                      <p className="text-slate-300 mb-4 text-sm font-medium">Premium feature for Pro users.</p>
+                      <button 
+                        onClick={() => setView('subscription')}
+                        className="bg-white text-slate-900 hover:bg-slate-100 px-4 py-2 rounded-lg text-sm font-bold transition-colors"
+                      >
+                        Upgrade to Unlock
+                      </button>
+                    </div>
+                  ) : isLoadingInsights ? (
                     <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-2">
                       <div className="w-6 h-6 border-2 border-primary-400 border-t-transparent rounded-full animate-spin"></div>
                       <p className="text-sm">Analyzing your spending...</p>
@@ -1042,12 +1061,12 @@ const App = () => {
               <div className="p-6 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center">
                 <h3 className="font-bold text-slate-900 dark:text-white">Recent Transactions</h3>
                  <button 
-                  onClick={handleExportCSV}
-                  disabled={transactions.length === 0}
+                  onClick={user?.plan === 'free' ? () => setView('subscription') : handleExportCSV}
+                  disabled={transactions.length === 0 && user?.plan !== 'free'}
                   className="flex items-center gap-2 text-sm text-slate-500 hover:text-primary-600 dark:text-slate-400 dark:hover:text-primary-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
-                  <Download size={16} />
-                  <span className="hidden sm:inline">Export CSV</span>
+                  {user?.plan === 'free' ? <Lock size={16} /> : <Download size={16} />}
+                  <span className="hidden sm:inline">{user?.plan === 'free' ? 'Export (Pro)' : 'Export CSV'}</span>
                 </button>
               </div>
               <div className="overflow-y-auto flex-1">
