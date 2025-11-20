@@ -243,7 +243,14 @@ const AuthScreen = () => {
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err: any) {
-      setError(err.message);
+      console.error("Google Sign In Error:", err);
+      if (err.code === 'auth/unauthorized-domain') {
+        setError("Domain not authorized. Go to Firebase Console > Authentication > Settings > Authorized Domains and add your domain (e.g., finsight-dashboard.vercel.app).");
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        setError("Sign in cancelled.");
+      } else {
+        setError(err.message.replace('Firebase: ', ''));
+      }
     } finally {
       setLoading(false);
     }
@@ -262,7 +269,13 @@ const AuthScreen = () => {
         await signInWithEmailAndPassword(auth, email, password);
       }
     } catch (err: any) {
-      setError(err.message.replace('Firebase: ', ''));
+      if (err.code === 'auth/invalid-credential') {
+        setError("Invalid email or password.");
+      } else if (err.code === 'auth/email-already-in-use') {
+        setError("Email is already in use.");
+      } else {
+        setError(err.message.replace('Firebase: ', ''));
+      }
     } finally {
       setLoading(false);
     }
@@ -293,7 +306,7 @@ const AuthScreen = () => {
           </h3>
           
           {error && (
-            <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm">
+            <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm border border-red-200">
               {error}
             </div>
           )}
