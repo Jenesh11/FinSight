@@ -29,7 +29,7 @@ import { generateFinancialInsights } from './services/geminiService';
 
 // --- DATA & CONSTANTS ---
 
-const RAZORPAY_KEY_ID = process.env.VITE_RAZORPAY_KEY_ID || "rzp_test_Rhn9WhwAS4RZoF";
+const RAZORPAY_KEY_ID = process.env.VITE_RAZORPAY_KEY_ID || "";
 const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID || "";
 
 const CURRENCIES = [
