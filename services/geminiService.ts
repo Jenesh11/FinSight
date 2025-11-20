@@ -1,12 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
-import { Transaction, TransactionType } from "../types";
-
-// Initialize the client
-// API Key is assumed to be in process.env.API_KEY as per instructions
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+import { Transaction } from "../types";
 
 export const generateFinancialInsights = async (transactions: Transaction[]): Promise<string> => {
   try {
+    // Initialize AI client directly with process.env.API_KEY as per guidelines
+    // Note: process.env.API_KEY is polyfilled via vite.config.ts for browser compatibility
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
     // Prepare a summary of the data to send to the model to save tokens
     const summary = transactions.slice(0, 50).map(t => ({
       date: t.date.toISOString().split('T')[0],

@@ -29,8 +29,22 @@ import { generateFinancialInsights } from './services/geminiService';
 
 // --- DATA & CONSTANTS ---
 
-const RAZORPAY_KEY_ID = process.env.VITE_RAZORPAY_KEY_ID || "";
-const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID || "";
+// Safe access to environment variables
+const getEnvVar = (key: string, fallback: string) => {
+  try {
+    // @ts-ignore
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+      // @ts-ignore
+      return import.meta.env[key] || fallback;
+    }
+  } catch (e) {
+    console.warn('Error reading environment variable:', key);
+  }
+  return fallback;
+};
+
+const RAZORPAY_KEY_ID = getEnvVar('VITE_RAZORPAY_KEY_ID', "rzp_test_Rhn9WhwAS4RZoF");
+const GOOGLE_CLIENT_ID = getEnvVar('VITE_GOOGLE_CLIENT_ID', "1020638093138-78d5phdu93v7i5aotqt69u27svumlaj7.apps.googleusercontent.com");
 
 const CURRENCIES = [
   { code: 'USD', symbol: '$', name: 'United States Dollar' },
