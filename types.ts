@@ -41,6 +41,7 @@ export interface DailyBalance {
 export type PlanType = 'free' | 'pro_monthly' | 'pro_yearly';
 
 export interface User {
+  id: string;
   name: string;
   email: string;
   plan: PlanType;

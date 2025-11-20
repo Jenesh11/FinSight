@@ -27,11 +27,38 @@ import { Transaction, TransactionType, Category, DailyBalance, User, PlanType } 
 import { BalanceTrendChart, ExpensePieChart, IncomeDoughnutChart, DailyBarChart } from './components/Charts';
 import { generateFinancialInsights } from './services/geminiService';
 
+// Firebase Imports
+import { auth, db, googleProvider } from './firebase';
+import { 
+  signInWithPopup, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  updateProfile
+} from 'firebase/auth';
+import { 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  Timestamp,
+  updateDoc 
+} from 'firebase/firestore';
+
 // --- DATA & CONSTANTS ---
 
 // Safe access to environment variables
 const getEnvVar = (key: string, fallback: string) => {
   try {
+    // @ts-ignore
+    if (typeof process !== 'undefined' && process.env && process.env[key]) {
+      // @ts-ignore
+      return process.env[key];
+    }
     // @ts-ignore
     if (typeof import.meta !== 'undefined' && import.meta.env) {
       // @ts-ignore
@@ -44,7 +71,6 @@ const getEnvVar = (key: string, fallback: string) => {
 };
 
 const RAZORPAY_KEY_ID = getEnvVar('VITE_RAZORPAY_KEY_ID', "rzp_test_Rhn9WhwAS4RZoF");
-const GOOGLE_CLIENT_ID = getEnvVar('VITE_GOOGLE_CLIENT_ID', "1020638093138-78d5phdu93v7i5aotqt69u27svumlaj7.apps.googleusercontent.com");
 
 const CURRENCIES = [
   { code: 'USD', symbol: '$', name: 'United States Dollar' },
@@ -89,7 +115,7 @@ const CURRENCIES = [
   { code: 'BDT', symbol: '৳', name: 'Bangladeshi Taka' },
 ];
 
-// Approximate exchange rates relative to USD for demo purposes
+// Approximate exchange rates relative to USD
 const EXCHANGE_RATES: Record<string, number> = {
   USD: 1,
   EUR: 0.92,
@@ -145,7 +171,7 @@ const BASE_PLANS = [
   {
     id: 'pro_monthly',
     name: 'Pro Monthly',
-    basePrice: 99, // Defined conceptually, logic below overrides this to anchor on INR
+    basePrice: 99,
     period: '/mo',
     features: ['AI Financial Insights', 'Unlimited History', 'Export to CSV/PDF', 'Multi-currency Support', 'Priority Support'],
     recommended: false
@@ -153,79 +179,12 @@ const BASE_PLANS = [
   {
     id: 'pro_yearly',
     name: 'Pro Yearly',
-    basePrice: 999, // Defined conceptually, logic below overrides this to anchor on INR
+    basePrice: 999,
     period: '/yr',
     features: ['All Pro Features', 'Save ~15%', 'Early Access to Beta Features', 'Dedicated Account Manager'],
     recommended: true
   }
 ];
-
-// Utility to parse JWT from Google
-const parseJwt = (token: string) => {
-  try {
-    return JSON.parse(atob(token.split('.')[1]));
-  } catch (e) {
-    return null;
-  }
-};
-
-const generateMockData = (days: number): Transaction[] => {
-  const transactions: Transaction[] = [];
-  const now = new Date();
-  
-  for (let i = 0; i < days; i++) {
-    const date = new Date(now);
-    date.setDate(date.getDate() - i);
-    
-    // Income: Salary bi-weekly
-    if (i % 14 === 0) {
-      transactions.push({
-        id: `inc-${i}-${Math.random().toString(36).substr(2, 9)}`,
-        date,
-        amount: 3500 + Math.random() * 500,
-        type: TransactionType.INCOME,
-        category: Category.SALARY,
-        description: 'Bi-weekly Salary'
-      });
-    }
-
-    // Daily Expenses
-    if (Math.random() > 0.3) {
-      transactions.push({
-        id: `exp-${i}-1-${Math.random().toString(36).substr(2, 9)}`,
-        date,
-        amount: 15 + Math.random() * 80,
-        type: TransactionType.EXPENSE,
-        category: Category.GROCERIES,
-        description: 'Grocery Store'
-      });
-    }
-    
-    if (Math.random() > 0.7) {
-      transactions.push({
-        id: `exp-${i}-2-${Math.random().toString(36).substr(2, 9)}`,
-        date,
-        amount: 10 + Math.random() * 40,
-        type: TransactionType.EXPENSE,
-        category: Category.ENTERTAINMENT,
-        description: 'Movies/Games'
-      });
-    }
-
-     // Rent once a month
-    if (date.getDate() === 1) {
-      transactions.push({
-        id: `rent-${i}-${Math.random().toString(36).substr(2, 9)}`,
-        date,
-        amount: 1800,
-        type: TransactionType.EXPENSE,
-        category: Category.RENT,
-        description: 'Monthly Rent'
-      });
-    }
-  }
-  return transactions.sort((a, b) => b.date.getTime() - a.date.getTime());
-};
 
 // --- SUB-COMPONENTS ---
 
@@ -270,57 +229,43 @@ const Modal = ({ isOpen, onClose, title, children }: any) => {
 
 // --- SCREEN COMPONENTS ---
 
-const AuthScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
+const AuthScreen = () => {
   const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
-  const googleButtonRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  // Initialize Google Sign In
-  useEffect(() => {
-    // Check if window.google is available and ID is present
-    if (typeof window.google !== 'undefined' && GOOGLE_CLIENT_ID) {
-      try {
-        window.google.accounts.id.initialize({
-          client_id: GOOGLE_CLIENT_ID,
-          callback: handleGoogleCallback
-        });
-        
-        window.google.accounts.id.renderButton(
-          googleButtonRef.current,
-          { theme: "outline", size: "large", width: "100%" } 
-        );
-      } catch (error) {
-        console.error("Google Auth Initialization Error:", error);
-      }
-    }
-  }, []);
-
-  const handleGoogleCallback = (response: any) => {
-    const payload = parseJwt(response.credential);
-    if (payload) {
-      const googleUser: User = {
-        name: payload.name,
-        email: payload.email,
-        plan: 'free',
-        memberSince: new Date(),
-        picture: payload.picture
-      };
-      onLogin(googleUser);
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Simulate Standard Auth
-    const user: User = {
-      name: name || email.split('@')[0],
-      email: email,
-      plan: 'free',
-      memberSince: new Date()
-    };
-    onLogin(user);
+    setLoading(true);
+    setError('');
+    
+    try {
+      if (isRegister) {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(userCredential.user, { displayName: name });
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err: any) {
+      setError(err.message.replace('Firebase: ', ''));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -332,16 +277,6 @@ const AuthScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
           <div className="absolute -bottom-10 -left-10 w-40 h-40 bg-white opacity-10 rounded-full blur-3xl"></div>
           <h2 className="text-4xl font-bold mb-6 relative z-10">Master Your Money</h2>
           <p className="text-lg opacity-90 mb-8 relative z-10">Join thousands of users who are tracking, planning, and growing their wealth with FinSight.</p>
-          <div className="flex items-center space-x-4 relative z-10">
-            <div className="flex -space-x-2">
-              {[1,2,3].map(i => (
-                <div key={i} className="w-10 h-10 rounded-full border-2 border-primary-500 bg-slate-200 flex items-center justify-center text-xs text-slate-900 font-bold">
-                  U{i}
-                </div>
-              ))}
-            </div>
-            <span className="text-sm font-medium">Trusted by 10k+ users</span>
-          </div>
         </div>
 
         {/* Right Side - Form */}
@@ -356,20 +291,29 @@ const AuthScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
           <h3 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">
             {isRegister ? 'Create an Account' : 'Welcome Back'}
           </h3>
-          <p className="text-slate-500 mb-6">
-            {isRegister ? 'Start your financial journey today.' : 'Please enter your details to sign in.'}
-          </p>
+          
+          {error && (
+            <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm">
+              {error}
+            </div>
+          )}
 
           <div className="space-y-4">
-            {/* Official Google Button Container */}
-            <div ref={googleButtonRef} className="w-full flex justify-center">
-              {/* Fallback if JS hasn't loaded or ID is missing */}
-               {!GOOGLE_CLIENT_ID && (
-                 <div className="text-xs text-red-500 text-center border border-red-200 p-2 rounded bg-red-50">
-                   developer: set VITE_GOOGLE_CLIENT_ID in .env file to enable Google Sign In
-                 </div>
-               )}
-            </div>
+            <button 
+              onClick={handleGoogleSignIn}
+              disabled={loading}
+              className="w-full flex items-center justify-center space-x-3 py-3 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+              </svg>
+              <span className="text-slate-700 dark:text-slate-200 font-medium">
+                {loading ? 'Connecting...' : 'Sign in with Google'}
+              </span>
+            </button>
 
             <div className="flex items-center">
               <div className="flex-1 border-t border-slate-200 dark:border-slate-700"></div>
@@ -415,8 +359,8 @@ const AuthScreen = ({ onLogin }: { onLogin: (user: User) => void }) => {
               />
             </div>
 
-            <button type="submit" className="w-full bg-primary-600 hover:bg-primary-700 text-white font-bold py-3 rounded-lg transition-colors shadow-lg shadow-primary-500/25">
-              {isRegister ? 'Sign Up' : 'Sign In'}
+            <button type="submit" disabled={loading} className="w-full bg-primary-600 hover:bg-primary-700 text-white font-bold py-3 rounded-lg transition-colors shadow-lg shadow-primary-500/25">
+              {loading ? 'Processing...' : (isRegister ? 'Sign Up' : 'Sign In')}
             </button>
           </form>
 
@@ -523,7 +467,7 @@ const PaymentModal = ({ plan, isOpen, onClose, onSuccess, user, currencyCode, cu
 
     const options = {
       key: RAZORPAY_KEY_ID,
-      amount: Math.round(plan.price * 100), // Amount in smallest currency unit (e.g. cents/paise)
+      amount: Math.round(plan.price * 100), 
       currency: currencyCode,
       name: "FinSight AI",
       description: `Subscription for ${plan.name}`,
@@ -537,7 +481,7 @@ const PaymentModal = ({ plan, isOpen, onClose, onSuccess, user, currencyCode, cu
       prefill: {
         name: user?.name || "User Name",
         email: user?.email || "user@example.com",
-        contact: "9000090000" // Dummy contact for test
+        contact: "9000090000"
       },
       theme: {
         color: "#0ea5e9"
@@ -607,8 +551,8 @@ const PaymentModal = ({ plan, isOpen, onClose, onSuccess, user, currencyCode, cu
 
 const App = () => {
   // Auth State
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
 
   // App State
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
@@ -638,31 +582,67 @@ const App = () => {
     CURRENCIES.find(c => c.code === currencyCode)?.symbol || '$', 
   [currencyCode]);
 
-  // Calculate Localized Plans based on currency
   const currentPlans = useMemo(() => {
     return BASE_PLANS.map(plan => {
       if (plan.id === 'free') return { ...plan, price: 0 };
-
-      // Define base prices in INR as the source of truth (user requirement)
-      // Monthly: 99 INR, Yearly: 999 INR
       const basePriceINR = plan.id === 'pro_yearly' ? 999 : 99;
-      
-      // 1. Convert INR to USD first (Intermediate step)
-      // Rate: 1 USD = 83.5 INR -> 1 INR = 1/83.5 USD
       const priceInUSD = basePriceINR / EXCHANGE_RATES['INR'];
-      
-      // 2. Convert USD to Target Currency
       const rate = EXCHANGE_RATES[currencyCode] || 1;
-      const convertedPrice = priceInUSD * rate;
-
       return {
         ...plan,
-        price: convertedPrice
+        price: priceInUSD * rate
       };
     });
   }, [currencyCode]);
 
-  // Init
+  // Handle Auth State Changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        setUser({
+          name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+          email: firebaseUser.email || '',
+          plan: 'free', // In a real app, fetch this from DB
+          memberSince: new Date(firebaseUser.metadata.creationTime || Date.now()),
+          picture: firebaseUser.photoURL || undefined,
+          id: firebaseUser.uid
+        } as any);
+      } else {
+        setUser(null);
+        setTransactions([]);
+      }
+      setLoadingAuth(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Real-time Database Listener
+  useEffect(() => {
+    if (!user || !user.id) return;
+
+    // Listen to user's transactions collection
+    // Assumes security rules: match /users/{userId}/transactions/{document=**} { allow read, write: if request.auth.uid == userId; }
+    const q = query(
+      collection(db, 'users', user.id, 'transactions'), 
+      orderBy('date', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const loaded: Transaction[] = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        date: doc.data().date instanceof Timestamp ? doc.data().date.toDate() : new Date(doc.data().date)
+      } as Transaction));
+      setTransactions(loaded);
+    }, (error) => {
+      console.error("DB Error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [user?.id]);
+
+  // Init Theme
   useEffect(() => {
     if (theme === 'dark') {
       document.documentElement.classList.add('dark');
@@ -671,18 +651,79 @@ const App = () => {
     }
   }, [theme]);
 
-  // Auth Handlers
-  const handleLogin = (newUser: User) => {
-    setUser(newUser);
-    setIsAuthenticated(true);
-    setTransactions([]); // Ensure clean slate for new user
+  const handleAddTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user?.id) return;
+
+    try {
+      const newTransaction = {
+        amount: parseFloat(formAmount),
+        type: formType,
+        category: formCategory,
+        description: formDesc,
+        date: new Date() // Firestore will convert this to Timestamp
+      };
+
+      await addDoc(collection(db, 'users', user.id, 'transactions'), newTransaction);
+      
+      setIsAddModalOpen(false);
+      setFormAmount('');
+      setFormDesc('');
+      setFormCategory(Category.OTHER);
+    } catch (error) {
+      console.error("Error adding transaction: ", error);
+      alert("Failed to add transaction");
+    }
   };
 
-  const handleLogout = () => {
-    setIsAuthenticated(false);
-    setUser(null);
-    setView('dashboard');
-    setTransactions([]);
+  const handleDeleteTransaction = async () => {
+    if (transactionToDelete && user?.id) {
+      try {
+        await deleteDoc(doc(db, 'users', user.id, 'transactions', transactionToDelete));
+        setTransactionToDelete(null);
+        setIsDeleteModalOpen(false);
+      } catch (error) {
+        console.error("Error deleting transaction: ", error);
+        alert("Failed to delete transaction");
+      }
+    }
+  };
+
+  const handleExportCSV = () => {
+    if (transactions.length === 0) return;
+    
+    const headers = ['Date', 'Type', 'Category', 'Description', 'Amount', 'Currency'];
+    const csvRows = [headers.join(',')];
+    
+    transactions.forEach(t => {
+      const row = [
+        t.date.toLocaleDateString(),
+        t.type,
+        t.category,
+        `"${t.description.replace(/"/g, '""')}"`,
+        t.amount.toFixed(2),
+        currencyCode
+      ];
+      csvRows.push(row.join(','));
+    });
+    
+    const csvString = csvRows.join('\n');
+    const blob = new Blob([csvString], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.setAttribute('hidden', '');
+    a.setAttribute('href', url);
+    a.setAttribute('download', `finsight_export_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const generateInsights = async () => {
+    setIsLoadingInsights(true);
+    const insights = await generateFinancialInsights(transactions);
+    setAiInsights(insights);
+    setIsLoadingInsights(false);
   };
 
   const handleUpgradeClick = (plan: any) => {
@@ -690,10 +731,21 @@ const App = () => {
     setIsPaymentModalOpen(true);
   };
 
-  const handlePaymentSuccess = () => {
+  const handlePaymentSuccess = async () => {
     if (user && selectedPlan) {
+      // In a real app, verify payment server-side then update
+      // For now, just update local state, but we should probably store this in DB
       setUser({ ...user, plan: selectedPlan.id });
       alert(`Successfully upgraded to ${selectedPlan.name}!`);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setView('dashboard');
+    } catch (error) {
+      console.error("Logout error", error);
     }
   };
 
@@ -706,11 +758,13 @@ const App = () => {
   }, [transactions]);
 
   const chartData = useMemo(() => {
-    // Daily Balance Logic
     const dailyMap = new Map<string, { income: number; expense: number }>();
     const now = new Date();
-    // Initialize last 60 days map
-    for(let i=59; i>=0; i--) {
+    
+    // If no transactions, show last 7 days empty
+    const daysToShow = transactions.length > 0 ? 60 : 7;
+
+    for(let i=daysToShow-1; i>=0; i--) {
         const d = new Date();
         d.setDate(now.getDate() - i);
         const key = d.toISOString().split('T')[0];
@@ -726,621 +780,507 @@ const App = () => {
       }
     });
 
-    let runningBalance = 0; // Start from 0 for new accounts
-    const dailyData: DailyBalance[] = [];
-    
-    Array.from(dailyMap.entries()).sort().forEach(([date, vals]) => {
+    const data: DailyBalance[] = [];
+    let runningBalance = 0; // Start at 0 for new users
+
+    Array.from(dailyMap.entries()).sort().forEach(([dateStr, vals]) => {
       runningBalance += (vals.income - vals.expense);
-      dailyData.push({
-        date: date.slice(5), // MM-DD
+      data.push({
+        date: new Date(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
         balance: runningBalance,
         income: vals.income,
         expense: vals.expense
       });
     });
 
-    // Pie Data
-    const expenseCategories: {[key: string]: number} = {};
-    transactions.filter(t => t.type === TransactionType.EXPENSE).forEach(t => {
-        expenseCategories[t.category] = (expenseCategories[t.category] || 0) + t.amount;
-    });
-    const pieData = Object.entries(expenseCategories).map(([name, value]) => ({ name, value }));
-
-    // Doughnut Data
-    const incomeSources: {[key: string]: number} = {};
-    transactions.filter(t => t.type === TransactionType.INCOME).forEach(t => {
-        incomeSources[t.category] = (incomeSources[t.category] || 0) + t.amount;
-    });
-    const doughnutData = Object.entries(incomeSources).map(([name, value]) => ({ name, value }));
-
-    return { dailyData, pieData, doughnutData };
+    return data;
   }, [transactions]);
 
-  // Handlers
-  const handleAddTransaction = (e: React.FormEvent) => {
-    e.preventDefault();
-    const newTransaction: Transaction = {
-      id: Date.now().toString(),
-      date: new Date(),
-      amount: parseFloat(formAmount),
-      type: formType,
-      category: formCategory,
-      description: formDesc || 'No description'
-    };
-    setTransactions([newTransaction, ...transactions]);
-    setIsAddModalOpen(false);
-    setFormAmount('');
-    setFormDesc('');
-  };
-
-  // Initialize Delete Process
-  const initiateDelete = (id: string) => {
-    setTransactionToDelete(id);
-    setIsDeleteModalOpen(true);
-  };
-
-  // Confirm Delete
-  const confirmDelete = () => {
-    if (transactionToDelete) {
-      setTransactions(prev => prev.filter(t => t.id !== transactionToDelete));
-      setTransactionToDelete(null);
-      setIsDeleteModalOpen(false);
-    }
-  };
-
-  const handleGenerateInsights = async () => {
-    if (transactions.length === 0) {
-      setAiInsights("<li>Please add some transactions first so I can analyze your spending habits!</li>");
-      return;
-    }
-    setIsLoadingInsights(true);
-    const insights = await generateFinancialInsights(transactions);
-    setAiInsights(insights);
-    setIsLoadingInsights(false);
-  };
-
-  const handleExportCSV = () => {
-    if (transactions.length === 0) {
-      alert("No transactions to export.");
-      return;
-    }
-
-    const headers = ["Date", "Type", "Category", "Description", "Amount", "Currency"];
-    const rows = transactions.map(t => {
-      const dateStr = t.date.toISOString().split('T')[0];
-      const cleanDesc = t.description.replace(/"/g, '""'); // Escape quotes
-      return [
-        dateStr,
-        t.type,
-        t.category,
-        `"${cleanDesc}"`,
-        t.amount.toFixed(2),
-        currencyCode
-      ].join(",");
+  const expenseData = useMemo(() => {
+    const map = new Map<string, number>();
+    transactions.filter(t => t.type === TransactionType.EXPENSE).forEach(t => {
+      map.set(t.category, (map.get(t.category) || 0) + t.amount);
     });
+    return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
+  }, [transactions]);
 
-    const csvContent = [headers.join(","), ...rows].join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `finsight_export_${new Date().toISOString().slice(0,10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+  const incomeData = useMemo(() => {
+    const map = new Map<string, number>();
+    transactions.filter(t => t.type === TransactionType.INCOME).forEach(t => {
+      map.set(t.category, (map.get(t.category) || 0) + t.amount);
+    });
+    return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
+  }, [transactions]);
 
-  // View Components
-  const SidebarItem = ({ icon: Icon, label, active, onClick }: any) => (
-    <button 
-      onClick={onClick}
-      className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-colors ${active ? 'bg-primary-500 text-white shadow-lg shadow-primary-500/30' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-    >
-      <Icon size={20} />
-      <span className="font-medium">{label}</span>
-    </button>
-  );
+  if (loadingAuth) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-500"></div>
+      </div>
+    );
+  }
 
-  // Render Logic
-  if (!isAuthenticated) {
-    return <AuthScreen onLogin={handleLogin} />;
+  if (!user) {
+    return <AuthScreen />;
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950 font-sans">
-      {/* Sidebar */}
-      <aside className={`
-        fixed inset-y-0 left-0 z-40 w-64 transform transition-transform duration-300 ease-in-out bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800
-        ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 md:static
-      `}>
-        <div className="p-6 flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <div className="bg-primary-500 p-2 rounded-lg">
-              <Wallet className="text-white w-6 h-6" />
-            </div>
-            <span className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">FinSight</span>
+    <div className="flex h-screen overflow-hidden">
+      {/* Sidebar - Desktop */}
+      <aside className="hidden md:flex flex-col w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-colors duration-300">
+        <div className="p-6 flex items-center space-x-2">
+          <div className="bg-primary-500 p-2 rounded-lg">
+            <Wallet className="text-white w-6 h-6" />
           </div>
-          <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-500">
-            <X size={24} />
-          </button>
+          <span className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">FinSight</span>
         </div>
 
-        <nav className="px-4 space-y-2 mt-6">
-          <SidebarItem 
-            icon={LayoutDashboard} 
-            label="Dashboard" 
-            active={view === 'dashboard'} 
-            onClick={() => setView('dashboard')} 
-          />
-          <SidebarItem 
-            icon={Crown} 
-            label="Subscription" 
-            active={view === 'subscription'} 
-            onClick={() => setView('subscription')} 
-          />
-          <SidebarItem 
-            icon={SettingsIcon} 
-            label="Settings" 
-            active={view === 'settings'} 
-            onClick={() => setView('settings')} 
-          />
+        <nav className="flex-1 px-4 space-y-2 mt-4">
+          <button 
+            onClick={() => setView('dashboard')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${view === 'dashboard' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+          >
+            <LayoutDashboard size={20} />
+            <span>Dashboard</span>
+          </button>
+          <button 
+            onClick={() => setView('subscription')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${view === 'subscription' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+          >
+            <Crown size={20} />
+            <span>Subscription</span>
+            {user.plan === 'free' && <span className="ml-auto text-xs bg-primary-100 text-primary-700 px-2 py-0.5 rounded-full">PRO</span>}
+          </button>
+           <button 
+            onClick={() => setView('settings')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${view === 'settings' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-600 dark:text-primary-400 font-medium' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+          >
+            <SettingsIcon size={20} />
+            <span>Settings</span>
+          </button>
         </nav>
 
-        <div className="absolute bottom-8 left-4 right-4">
-           <div className="p-4 bg-slate-100 dark:bg-slate-800 rounded-2xl mb-4">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-primary-500 to-purple-500 flex items-center justify-center text-white font-bold uppercase overflow-hidden">
-                {user?.picture ? (
-                  <img src={user.picture} alt="Profile" className="w-full h-full object-cover" />
-                ) : (
-                  user?.name.slice(0, 2)
-                )}
-              </div>
-              <div className="overflow-hidden">
-                <p className="text-sm font-bold text-slate-900 dark:text-white truncate">{user?.name}</p>
-                <p className="text-xs text-slate-500 capitalize">{user?.plan.replace('_', ' ')} Plan</p>
-              </div>
-            </div>
+        <div className="p-4 border-t border-slate-200 dark:border-slate-800">
+          <div className="flex items-center space-x-3 mb-4 px-2">
+             <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-primary-500 to-purple-500 flex items-center justify-center text-white font-bold overflow-hidden">
+              {user.picture ? <img src={user.picture} alt={user.name} className="w-full h-full object-cover" /> : user.name[0]}
+             </div>
+             <div className="flex-1 min-w-0">
+               <p className="text-sm font-medium text-slate-900 dark:text-white truncate">{user.name}</p>
+               <p className="text-xs text-slate-500 truncate capitalize">{user.plan} Plan</p>
+             </div>
           </div>
           <button 
             onClick={handleLogout}
-            className="w-full flex items-center justify-center space-x-2 text-slate-500 hover:text-red-500 dark:hover:text-red-400 transition-colors py-2"
+            className="w-full flex items-center justify-center space-x-2 text-slate-500 hover:text-red-500 text-sm transition-colors py-2"
           >
-            <LogOut size={18} />
-            <span className="text-sm font-medium">Sign Out</span>
+            <LogOut size={16} />
+            <span>Sign Out</span>
           </button>
         </div>
       </aside>
 
+      {/* Mobile Header */}
+      <div className="md:hidden fixed top-0 left-0 right-0 z-20 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center space-x-2">
+          <div className="bg-primary-500 p-1.5 rounded-lg">
+            <Wallet className="text-white w-5 h-5" />
+          </div>
+          <span className="text-lg font-bold text-slate-900 dark:text-white">FinSight</span>
+        </div>
+        <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="text-slate-600 dark:text-slate-300">
+          {isMobileMenuOpen ? <X /> : <Menu />}
+        </button>
+      </div>
+
+      {/* Mobile Menu Overlay */}
+      {isMobileMenuOpen && (
+        <div className="md:hidden fixed inset-0 z-10 bg-slate-900/50 backdrop-blur-sm pt-16" onClick={() => setIsMobileMenuOpen(false)}>
+          <div className="bg-white dark:bg-slate-900 p-4 shadow-xl border-b border-slate-200 dark:border-slate-800 space-y-2">
+            <button onClick={() => { setView('dashboard'); setIsMobileMenuOpen(false); }} className="w-full text-left px-4 py-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200">Dashboard</button>
+            <button onClick={() => { setView('subscription'); setIsMobileMenuOpen(false); }} className="w-full text-left px-4 py-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200">Subscription</button>
+            <button onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }} className="w-full text-left px-4 py-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200">Settings</button>
+            <button onClick={handleLogout} className="w-full text-left px-4 py-3 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600">Sign Out</button>
+          </div>
+        </div>
+      )}
+
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto relative">
-        {/* Header */}
-        <header className="sticky top-0 z-30 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center md:hidden">
-            <button onClick={() => setIsMobileMenuOpen(true)} className="mr-4 text-slate-500">
-              <Menu size={24} />
-            </button>
-            <span className="font-bold text-lg dark:text-white">FinSight</span>
-          </div>
-          
-          <h1 className="hidden md:block text-2xl font-bold text-slate-800 dark:text-white capitalize">
-            {view === 'dashboard' ? 'Financial Overview' : view.replace('_', ' ')}
-          </h1>
-
-          <div className="flex items-center space-x-4">
-            <button 
-              onClick={() => setIsAddModalOpen(true)}
-              className="hidden md:flex items-center space-x-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg transition-all shadow-lg shadow-primary-500/20"
-            >
-              <PlusCircle size={18} />
-              <span>Add Transaction</span>
-            </button>
-            <button 
-              onClick={() => setIsAddModalOpen(true)}
-              className="md:hidden bg-primary-600 text-white p-2 rounded-full shadow-lg"
-            >
-              <PlusCircle size={20} />
-            </button>
-          </div>
-        </header>
-
-        <div className="p-6 max-w-7xl mx-auto">
-          {view === 'subscription' && user && (
-            <SubscriptionScreen 
-              user={user} 
-              plans={currentPlans} 
-              onUpgrade={handleUpgradeClick} 
-              currencySymbol={currencySymbol}
-              currencyCode={currencyCode}
-            />
-          )}
-
-          {view === 'dashboard' && (
-            <div className="space-y-6">
-              
-              {/* 3x3 Grid Layout Concept */}
-              {/* Top Row: Stats */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <StatCard 
-                  title="Total Balance" 
-                  value={`${currencySymbol}${stats.balance.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`} 
-                  trend={12.5} 
-                  icon={Wallet} 
-                  colorClass="bg-primary-500" 
-                  currencySymbol={currencySymbol}
-                />
-                <StatCard 
-                  title="Total Income" 
-                  value={`${currencySymbol}${stats.totalIncome.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`} 
-                  trend={8.2} 
-                  icon={TrendingUp} 
-                  colorClass="bg-green-500" 
-                  currencySymbol={currencySymbol}
-                />
-                <StatCard 
-                  title="Total Expenses" 
-                  value={`${currencySymbol}${stats.totalExpense.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`} 
-                  trend={-2.4} 
-                  icon={TrendingDown} 
-                  colorClass="bg-red-500" 
-                  currencySymbol={currencySymbol}
-                />
+      <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-950 pt-16 md:pt-0">
+        {view === 'dashboard' && (
+          <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-8">
+            {/* Header */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Financial Overview</h1>
+                <p className="text-slate-500 dark:text-slate-400">Welcome back, here's your financial health report.</p>
               </div>
+              <div className="flex items-center gap-3">
+                 <button 
+                  onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                  className="p-2 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:shadow-md transition-all"
+                >
+                  {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
+                </button>
+                <button 
+                  onClick={() => setIsAddModalOpen(true)}
+                  className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-xl font-medium shadow-lg shadow-primary-500/25 transition-all"
+                >
+                  <PlusCircle size={20} />
+                  <span>Add Transaction</span>
+                </button>
+              </div>
+            </div>
 
-              {/* Middle Row: Main Visualizations */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-auto lg:h-96">
-                {/* Large Chart - Takes 2 cols */}
-                <div className="lg:col-span-2 bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                  <h3 className="text-lg font-bold mb-4 text-slate-800 dark:text-white flex items-center">
-                    <CreditCard className="w-5 h-5 mr-2 text-primary-500" />
-                    60-Day Net Worth Trend
-                  </h3>
-                  <div className="h-72 w-full">
-                    <BalanceTrendChart data={chartData.dailyData} currency={currencySymbol} />
-                  </div>
-                </div>
+            {/* Stats Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <StatCard 
+                title="Total Balance" 
+                value={`${currencySymbol}${stats.balance.toLocaleString(undefined, {minimumFractionDigits: 2})}`} 
+                trend={8.2} 
+                icon={Wallet} 
+                colorClass="bg-blue-500" 
+              />
+              <StatCard 
+                title="Total Income" 
+                value={`${currencySymbol}${stats.totalIncome.toLocaleString(undefined, {minimumFractionDigits: 2})}`} 
+                trend={12.5} 
+                icon={TrendingUp} 
+                colorClass="bg-green-500" 
+              />
+              <StatCard 
+                title="Total Expense" 
+                value={`${currencySymbol}${stats.totalExpense.toLocaleString(undefined, {minimumFractionDigits: 2})}`} 
+                trend={-2.4} 
+                icon={TrendingDown} 
+                colorClass="bg-red-500" 
+              />
+            </div>
 
-                {/* Side Chart - AI Insights */}
-                <div className="bg-gradient-to-br from-indigo-900 to-slate-900 text-white p-6 rounded-2xl shadow-lg border border-indigo-500/30 relative overflow-hidden">
-                  <div className="absolute top-0 right-0 p-32 bg-primary-500 rounded-full blur-[100px] opacity-20"></div>
-                  <div className="relative z-10 h-full flex flex-col">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-bold flex items-center">
-                        <Sparkles className="w-5 h-5 mr-2 text-yellow-300" />
-                        Gemini AI Advisor
-                      </h3>
-                    </div>
-                    
-                    <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
-                      {!aiInsights && !isLoadingInsights && (
-                        <div className="text-center mt-10 opacity-80">
-                          <p>Click below to analyze your spending habits.</p>
-                        </div>
-                      )}
-                      {isLoadingInsights && (
-                         <div className="flex flex-col items-center justify-center h-full space-y-3">
-                           <div className="w-8 h-8 border-4 border-white border-t-transparent rounded-full animate-spin"></div>
-                           <p className="text-sm text-indigo-200">Analyzing financial data...</p>
-                         </div>
-                      )}
-                      {aiInsights && (
-                        <div className="prose prose-invert prose-sm">
-                           <ul className="list-disc pl-4 space-y-2 text-indigo-100" dangerouslySetInnerHTML={{__html: aiInsights}}></ul>
-                        </div>
-                      )}
-                    </div>
-
-                    <button 
-                      onClick={handleGenerateInsights}
-                      disabled={isLoadingInsights}
-                      className="mt-4 w-full bg-white text-indigo-900 py-2 px-4 rounded-lg font-semibold hover:bg-indigo-50 transition-colors disabled:opacity-50"
-                    >
-                      {aiInsights ? 'Refresh Insights' : 'Generate Insights'}
-                    </button>
-                  </div>
+            {/* Charts Section 1 */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-96">
+              <div className="lg:col-span-2 bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
+                <h3 className="font-bold text-slate-800 dark:text-slate-200 mb-4">Balance Trend (60 Days)</h3>
+                <div className="h-80 w-full">
+                   <BalanceTrendChart data={chartData} currency={currencySymbol} />
                 </div>
               </div>
-
-              {/* Bottom Row: Secondary Charts */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                  <h3 className="text-lg font-bold mb-4 text-slate-800 dark:text-white">Expense Breakdown</h3>
-                  <div className="h-64">
-                    <ExpensePieChart data={chartData.pieData} currency={currencySymbol} />
-                  </div>
-                </div>
-                 <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                  <h3 className="text-lg font-bold mb-4 text-slate-800 dark:text-white">Income Sources</h3>
-                  <div className="h-64">
-                    <IncomeDoughnutChart data={chartData.doughnutData} currency={currencySymbol} />
-                  </div>
-                </div>
-                <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800">
-                  <h3 className="text-lg font-bold mb-4 text-slate-800 dark:text-white">Daily Activity</h3>
-                  <div className="h-64">
-                    <DailyBarChart data={chartData.dailyData} currency={currencySymbol} />
-                  </div>
+              <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col">
+                <h3 className="font-bold text-slate-800 dark:text-slate-200 mb-4">Income Sources</h3>
+                <div className="flex-1 min-h-0">
+                  <IncomeDoughnutChart data={incomeData} currency={currencySymbol} />
                 </div>
               </div>
+            </div>
 
-              {/* Transactions List */}
-              <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col h-96">
-                <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-row justify-between items-center gap-4">
-                  <div className="flex items-center gap-3">
-                    <h3 className="text-lg font-bold text-slate-800 dark:text-white">All Transactions</h3>
-                    <span className="text-xs text-slate-500 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded-full hidden sm:inline-block">{transactions.length} items</span>
-                  </div>
-                  <button 
-                    onClick={handleExportCSV}
-                    disabled={transactions.length === 0}
-                    className="flex items-center space-x-2 text-sm font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    title="Download CSV"
-                  >
-                    <Download size={16} />
-                    <span className="hidden sm:inline">Export CSV</span>
-                  </button>
+            {/* AI & Secondary Charts */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-1 bg-gradient-to-br from-slate-900 to-slate-800 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden group">
+                <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                  <Sparkles size={100} />
                 </div>
-                <div className="overflow-y-auto flex-1">
-                  {transactions.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-full text-slate-400">
-                      <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-full mb-4">
-                        <Sparkles size={32} className="text-slate-300 dark:text-slate-600" />
-                      </div>
-                      <p className="font-medium">No transactions yet</p>
-                      <p className="text-sm mt-1 mb-4">Add your first income or expense to get started</p>
-                      <button 
-                        onClick={() => setIsAddModalOpen(true)}
-                        className="text-primary-600 font-bold text-sm hover:underline"
-                      >
-                        Add Transaction
-                      </button>
+                <div className="flex items-center gap-2 mb-4">
+                   <div className="bg-primary-500/20 p-2 rounded-lg">
+                      <Sparkles className="text-primary-400" size={24} />
+                   </div>
+                   <h3 className="font-bold text-xl">AI Insights</h3>
+                </div>
+                
+                <div className="space-y-4 relative z-10 min-h-[180px]">
+                  {isLoadingInsights ? (
+                    <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-2">
+                      <div className="w-6 h-6 border-2 border-primary-400 border-t-transparent rounded-full animate-spin"></div>
+                      <p className="text-sm">Analyzing your spending...</p>
                     </div>
+                  ) : aiInsights ? (
+                    <ul className="space-y-3 text-sm text-slate-300 list-disc pl-4" dangerouslySetInnerHTML={{__html: aiInsights}}></ul>
                   ) : (
-                    <table className="w-full text-sm text-left">
-                      <thead className="text-xs text-slate-500 uppercase bg-slate-50 dark:bg-slate-800 sticky top-0 z-10">
-                        <tr>
-                          <th className="px-6 py-3">Date</th>
-                          <th className="px-6 py-3">Category</th>
-                          <th className="px-6 py-3">Description</th>
-                          <th className="px-6 py-3 text-right">Amount</th>
-                          <th className="px-6 py-3 text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {transactions.map((t) => (
-                          <tr key={t.id} className="bg-white dark:bg-slate-900 border-b dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-                            <td className="px-6 py-4 font-medium text-slate-900 dark:text-white whitespace-nowrap">
-                              {t.date.toLocaleDateString()}
-                            </td>
-                            <td className="px-6 py-4">
-                              <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                                t.type === TransactionType.INCOME 
-                                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' 
-                                  : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                              }`}>
-                                {t.category}
-                              </span>
-                            </td>
-                            <td className="px-6 py-4 text-slate-500 dark:text-slate-400">
-                              {t.description}
-                            </td>
-                            <td className={`px-6 py-4 text-right font-bold ${
-                               t.type === TransactionType.INCOME ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
-                            }`}>
-                              {t.type === TransactionType.INCOME ? '+' : '-'}{currencySymbol}{t.amount.toFixed(2)}
-                            </td>
-                            <td className="px-6 py-4 text-right">
-                              <button
-                                type="button" 
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  initiateDelete(t.id);
-                                }}
-                                className="text-slate-400 hover:text-red-500 dark:text-slate-500 dark:hover:text-red-400 transition-colors p-2 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg"
-                                title="Delete Transaction"
-                              >
-                                <Trash2 size={18} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                     <div className="text-center text-slate-400 py-8">
+                        <p className="mb-4">Unlock smart financial advice based on your transaction history.</p>
+                        <button 
+                          onClick={generateInsights}
+                          disabled={transactions.length === 0}
+                          className="bg-primary-600 hover:bg-primary-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Generate Insights
+                        </button>
+                     </div>
                   )}
                 </div>
               </div>
 
+              <div className="lg:col-span-1 bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
+                <h3 className="font-bold text-slate-800 dark:text-slate-200 mb-4">Expense Breakdown</h3>
+                <div className="h-64">
+                  <ExpensePieChart data={expenseData} currency={currencySymbol} />
+                </div>
+              </div>
+
+              <div className="lg:col-span-1 bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
+                <h3 className="font-bold text-slate-800 dark:text-slate-200 mb-4">Daily Activity (Last 14 Days)</h3>
+                <div className="h-64">
+                  <DailyBarChart data={chartData} currency={currencySymbol} />
+                </div>
+              </div>
             </div>
-          )}
 
-          {view === 'settings' && (
-            <div className="max-w-2xl mx-auto bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-8">
-               <h2 className="text-2xl font-bold mb-6 text-slate-900 dark:text-white">Application Settings</h2>
+            {/* Transactions List */}
+            <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 overflow-hidden flex flex-col h-[500px]">
+              <div className="p-6 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center">
+                <h3 className="font-bold text-slate-900 dark:text-white">Recent Transactions</h3>
+                 <button 
+                  onClick={handleExportCSV}
+                  disabled={transactions.length === 0}
+                  className="flex items-center gap-2 text-sm text-slate-500 hover:text-primary-600 dark:text-slate-400 dark:hover:text-primary-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Download size={16} />
+                  <span className="hidden sm:inline">Export CSV</span>
+                </button>
+              </div>
+              <div className="overflow-y-auto flex-1">
+                {transactions.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-slate-400 p-8 text-center">
+                    <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-full mb-4">
+                      <CreditCard size={32} className="opacity-50" />
+                    </div>
+                    <h4 className="font-medium text-slate-900 dark:text-white mb-1">No transactions yet</h4>
+                    <p className="text-sm max-w-xs mx-auto">Start adding your income and expenses to see your financial insights.</p>
+                    <button 
+                      onClick={() => setIsAddModalOpen(true)}
+                      className="mt-4 text-primary-600 font-medium hover:underline"
+                    >
+                      Add your first transaction
+                    </button>
+                  </div>
+                ) : (
+                  <table className="w-full">
+                    <thead className="bg-slate-50 dark:bg-slate-900/50 sticky top-0 backdrop-blur-sm">
+                      <tr className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                        <th className="p-4">Transaction</th>
+                        <th className="p-4">Category</th>
+                        <th className="p-4">Date</th>
+                        <th className="p-4 text-right">Amount</th>
+                        <th className="p-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                      {transactions.map((t) => (
+                        <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group">
+                          <td className="p-4">
+                            <div className="flex items-center gap-3">
+                              <div className={`p-2 rounded-lg ${t.type === TransactionType.INCOME ? 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400'}`}>
+                                {t.type === TransactionType.INCOME ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
+                              </div>
+                              <div>
+                                <p className="font-medium text-slate-900 dark:text-white">{t.description}</p>
+                                <p className="text-xs text-slate-500 capitalize">{t.type}</p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                              {t.category}
+                            </span>
+                          </td>
+                          <td className="p-4 text-sm text-slate-500">
+                            {t.date.toLocaleDateString()}
+                          </td>
+                          <td className={`p-4 text-right font-bold ${t.type === TransactionType.INCOME ? 'text-green-600 dark:text-green-400' : 'text-slate-900 dark:text-white'}`}>
+                            {t.type === TransactionType.INCOME ? '+' : '-'}{currencySymbol}{t.amount.toFixed(2)}
+                          </td>
+                          <td className="p-4 text-right">
+                            <button 
+                              onClick={() => {
+                                setTransactionToDelete(t.id);
+                                setIsDeleteModalOpen(true);
+                              }}
+                              type="button"
+                              className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                              title="Delete transaction"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {view === 'subscription' && (
+          <SubscriptionScreen 
+            user={user} 
+            plans={currentPlans} 
+            onUpgrade={handleUpgradeClick} 
+            currencySymbol={currencySymbol}
+            currencyCode={currencyCode}
+          />
+        )}
+
+        {view === 'settings' && (
+           <div className="p-8 max-w-4xl mx-auto">
+             <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-6">Settings</h2>
+             <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-6 space-y-6">
                
-               <div className="space-y-8">
-                 <div className="flex items-center justify-between pb-6 border-b border-slate-100 dark:border-slate-800">
+               <div>
+                 <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-4">Preferences</h3>
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                    <div>
-                     <h3 className="text-lg font-medium text-slate-900 dark:text-white">Appearance</h3>
-                     <p className="text-slate-500 text-sm">Switch between light and dark modes.</p>
+                      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Currency</label>
+                      <select 
+                        value={currencyCode}
+                        onChange={(e) => setCurrencyCode(e.target.value)}
+                        className="w-full px-4 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none"
+                      >
+                        {CURRENCIES.map(c => (
+                          <option key={c.code} value={c.code}>{c.name} ({c.symbol})</option>
+                        ))}
+                      </select>
                    </div>
-                   <div className="flex items-center bg-slate-100 dark:bg-slate-800 rounded-lg p-1">
-                     <button 
-                       onClick={() => setTheme('light')}
-                       className={`p-2 rounded-md transition-all ${theme === 'light' ? 'bg-white shadow-sm text-primary-600' : 'text-slate-400'}`}
-                     >
-                       <Sun size={20} />
-                     </button>
-                     <button 
-                       onClick={() => setTheme('dark')}
-                       className={`p-2 rounded-md transition-all ${theme === 'dark' ? 'bg-slate-700 shadow-sm text-primary-400' : 'text-slate-400'}`}
-                     >
-                       <Moon size={20} />
-                     </button>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Theme</label>
+                      <div className="flex items-center space-x-4">
+                        <button 
+                          onClick={() => setTheme('light')}
+                          className={`flex-1 py-2.5 rounded-lg border ${theme === 'light' ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'}`}
+                        >
+                          Light
+                        </button>
+                        <button 
+                          onClick={() => setTheme('dark')}
+                          className={`flex-1 py-2.5 rounded-lg border ${theme === 'dark' ? 'border-primary-500 bg-primary-900/20 text-primary-400' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'}`}
+                        >
+                          Dark
+                        </button>
+                      </div>
                    </div>
-                 </div>
-
-                 <div className="flex items-center justify-between pb-6 border-b border-slate-100 dark:border-slate-800">
-                   <div>
-                     <h3 className="text-lg font-medium text-slate-900 dark:text-white">Currency</h3>
-                     <p className="text-slate-500 text-sm">Select your preferred display currency.</p>
-                   </div>
-                   <select 
-                    value={currencyCode}
-                    onChange={(e) => setCurrencyCode(e.target.value)}
-                    className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-primary-500 max-w-[150px] md:max-w-xs"
-                   >
-                     {CURRENCIES.map(c => (
-                       <option key={c.code} value={c.code}>{c.code} ({c.symbol}) - {c.name}</option>
-                     ))}
-                   </select>
-                 </div>
-
-                 <div className="pb-6">
-                    <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">Data Management</h3>
-                     <p className="text-slate-500 text-sm mb-4">Reset your dashboard data to default demo state.</p>
-                     <button 
-                       onClick={() => setTransactions(generateMockData(60))}
-                       className="text-red-500 hover:text-red-600 font-medium text-sm hover:underline"
-                     >
-                       Reset Demo Data
-                     </button>
                  </div>
                </div>
-            </div>
-          )}
-        </div>
+
+               <div className="pt-6 border-t border-slate-100 dark:border-slate-700">
+                 <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-4">Account</h3>
+                 <div className="flex items-center justify-between p-4 bg-slate-50 dark:bg-slate-900 rounded-lg">
+                    <div className="flex items-center space-x-4">
+                       <div className="w-12 h-12 rounded-full bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center text-primary-600 dark:text-primary-400 font-bold text-xl">
+                         {user.picture ? <img src={user.picture} className="w-full h-full rounded-full object-cover"/> : user.name[0]}
+                       </div>
+                       <div>
+                         <p className="font-medium text-slate-900 dark:text-white">{user.name}</p>
+                         <p className="text-sm text-slate-500">{user.email}</p>
+                       </div>
+                    </div>
+                    <button onClick={handleLogout} className="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+                 </div>
+               </div>
+
+             </div>
+           </div>
+        )}
       </main>
 
       {/* Add Transaction Modal */}
-      <Modal 
-        isOpen={isAddModalOpen} 
-        onClose={() => setIsAddModalOpen(false)} 
-        title="Add New Transaction"
-      >
+      <Modal isOpen={isAddModalOpen} onClose={() => setIsAddModalOpen(false)} title="Add Transaction">
         <form onSubmit={handleAddTransaction} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Type</label>
-            <div className="flex space-x-2">
-              <button
-                type="button"
-                onClick={() => setFormType(TransactionType.INCOME)}
-                className={`flex-1 py-2 rounded-lg border flex items-center justify-center space-x-2 ${
-                  formType === TransactionType.INCOME 
-                  ? 'bg-green-50 border-green-500 text-green-700 dark:bg-green-900/30 dark:text-green-400' 
-                  : 'border-slate-200 dark:border-slate-700 text-slate-500'
-                }`}
-              >
-                <PlusCircle size={16} />
-                <span>Income</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setFormType(TransactionType.EXPENSE)}
-                className={`flex-1 py-2 rounded-lg border flex items-center justify-center space-x-2 ${
-                  formType === TransactionType.EXPENSE 
-                  ? 'bg-red-50 border-red-500 text-red-700 dark:bg-red-900/30 dark:text-red-400' 
-                  : 'border-slate-200 dark:border-slate-700 text-slate-500'
-                }`}
-              >
-                <MinusCircle size={16} />
-                <span>Expense</span>
-              </button>
-            </div>
+          <div className="grid grid-cols-2 gap-4">
+            <button
+              type="button"
+              onClick={() => setFormType(TransactionType.INCOME)}
+              className={`p-3 rounded-lg border text-center transition-all ${formType === TransactionType.INCOME ? 'bg-green-50 border-green-500 text-green-700 dark:bg-green-900/20 dark:text-green-400' : 'border-slate-200 dark:border-slate-700 text-slate-500'}`}
+            >
+              Income
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormType(TransactionType.EXPENSE)}
+              className={`p-3 rounded-lg border text-center transition-all ${formType === TransactionType.EXPENSE ? 'bg-red-50 border-red-500 text-red-700 dark:bg-red-900/20 dark:text-red-400' : 'border-slate-200 dark:border-slate-700 text-slate-500'}`}
+            >
+              Expense
+            </button>
           </div>
-
+          
           <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Amount</label>
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">{currencySymbol}</span>
-              <input
-                type="number"
-                required
-                min="0.01"
-                step="0.01"
-                value={formAmount}
-                onChange={(e) => setFormAmount(e.target.value)}
-                className="w-full pl-8 pr-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none transition-all"
-                placeholder="0.00"
-              />
-            </div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Amount ({currencySymbol})</label>
+            <input 
+              type="number" 
+              required
+              min="0"
+              step="0.01"
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none"
+              placeholder="0.00"
+              value={formAmount}
+              onChange={e => setFormAmount(e.target.value)}
+            />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Category</label>
-            <select
+            <select 
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none"
               value={formCategory}
-              onChange={(e) => setFormCategory(e.target.value as Category)}
-              className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none transition-all"
+              onChange={e => setFormCategory(e.target.value as Category)}
             >
-              {Object.values(Category).map((cat) => (
-                <option key={cat} value={cat}>{cat}</option>
+              {Object.values(Category).map(c => (
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Description</label>
-            <input
-              type="text"
+            <input 
+              type="text" 
+              required
+              className="w-full px-4 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none"
+              placeholder="e.g. Monthly Rent"
               value={formDesc}
-              onChange={(e) => setFormDesc(e.target.value)}
-              className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 outline-none transition-all"
-              placeholder="e.g. Weekly Groceries"
+              onChange={e => setFormDesc(e.target.value)}
             />
           </div>
 
-          <button
-            type="submit"
-            className="w-full bg-primary-600 hover:bg-primary-700 text-white font-bold py-3 rounded-lg transition-colors shadow-lg shadow-primary-500/25 mt-2"
-          >
+          <button type="submit" className="w-full bg-primary-600 hover:bg-primary-700 text-white font-bold py-3 rounded-lg mt-4 shadow-lg shadow-primary-500/25">
             Save Transaction
           </button>
         </form>
       </Modal>
 
       {/* Delete Confirmation Modal */}
-      <Modal 
-        isOpen={isDeleteModalOpen} 
-        onClose={() => setIsDeleteModalOpen(false)} 
-        title="Delete Transaction"
-      >
-        <div className="space-y-4">
-          <div className="flex items-start space-x-4">
-            <div className="p-3 bg-red-100 dark:bg-red-900/30 rounded-full">
-              <AlertTriangle className="w-6 h-6 text-red-600 dark:text-red-400" />
-            </div>
-            <div>
-              <p className="text-slate-700 dark:text-slate-300">
-                Are you sure you want to delete this transaction? This action cannot be undone.
-              </p>
-            </div>
+      <Modal isOpen={isDeleteModalOpen} onClose={() => setIsDeleteModalOpen(false)} title="Confirm Deletion">
+        <div className="text-center space-y-4">
+          <div className="bg-red-100 dark:bg-red-900/30 p-4 rounded-full w-16 h-16 mx-auto flex items-center justify-center">
+            <AlertTriangle className="text-red-600 dark:text-red-400 w-8 h-8" />
           </div>
-          
-          <div className="flex space-x-3 mt-6 pt-4">
+          <h3 className="text-lg font-medium text-slate-900 dark:text-white">Are you sure?</h3>
+          <p className="text-slate-500 dark:text-slate-400">
+            This action cannot be undone. This transaction will be permanently removed from your account.
+          </p>
+          <div className="flex gap-3 pt-2">
             <button 
               onClick={() => setIsDeleteModalOpen(false)}
-              className="flex-1 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium transition-colors dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200"
+              className="flex-1 px-4 py-2.5 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-700 dark:text-slate-300 font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
             >
               Cancel
             </button>
             <button 
-              onClick={confirmDelete}
-              className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors shadow-lg shadow-red-500/30 flex justify-center items-center"
+              onClick={handleDeleteTransaction}
+              className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium shadow-lg shadow-red-500/25"
             >
-              <Trash2 size={18} className="mr-2" />
               Delete
             </button>
           </div>
         </div>
       </Modal>
 
-      {/* Payment Gateway Simulation Modal */}
+      {/* Payment Modal */}
       <PaymentModal 
-        plan={selectedPlan} 
-        user={user}
         isOpen={isPaymentModalOpen} 
-        onClose={() => setIsPaymentModalOpen(false)}
+        onClose={() => setIsPaymentModalOpen(false)} 
+        plan={selectedPlan}
         onSuccess={handlePaymentSuccess}
+        user={user}
         currencyCode={currencyCode}
         currencySymbol={currencySymbol}
       />
